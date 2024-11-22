@@ -97,7 +97,6 @@ def unselect_after_result():
     pyautogui.click()  # Click once to unselect any bet
 
 # Main function to handle detection, betting, and result-checking logic
-
 def run_betting_script():
     connection = create_connection()
     if connection is None:
@@ -107,23 +106,20 @@ def run_betting_script():
         prev_button_colors = {button: None for button in button_regions}
         last_change_time = {button: 0 for button in button_regions}
         color_change_cooldown = 4
-
-        previous_results = []            # Store results history
-        previous_assumption = None       # Initialize with no assumption
-        waiting_for_result = False       # Controls when to detect results
-        bets_open_detected = False       # Flag to ensure we detect BETS OPEN only once per round
-        round_complete = True            # Ensure a full round completes before restarting
+        previous_results = []           # Stores the history of game results
+        last_assumed_result = None      # The last assumption (used for betting)
+        waiting_for_result = False      # Controls when to detect results
+        bets_open_detected = False      # Flag to ensure we detect BETS OPEN only once per round
+        round_complete = True           # Ensure a full round completes before restarting
 
         while True:
             # Check for "BETS OPEN" text if not waiting for result and previous round completed
             if not waiting_for_result and round_complete and not bets_open_detected:
                 if detect_bets_open_text(sct):
-                    if previous_assumption is not None:
-                        # Place bet based on the previous assumption
-                        place_bet(previous_assumption)
-                        print(f"Placing bet on: {previous_assumption}")
+                    if last_assumed_result is not None:  # Skip betting in the first round
+                        place_bet(last_assumed_result)
                     else:
-                        print("First round - No bet placed. Waiting for the first result.")
+                        print("First game: No bet placed.")
 
                     waiting_for_result = True   # Start waiting for the game result
                     bets_open_detected = True   # Set flag so we don't repeatedly detect "BETS OPEN"
@@ -146,59 +142,28 @@ def run_betting_script():
                         color_diff = np.linalg.norm(current_color - prev_button_colors[button_name])
 
                         if color_diff > 15 and (time.time() - last_change_time[button_name] > color_change_cooldown):
-                            # Log result to the database and update results history
+                            # Log result to the database
                             insert_button_event(connection, button_name)
                             print(f"{button_name} WON")
 
-                            # Append the result to the results history
+                            # Add result to history
                             previous_results.append(button_name)
 
-                            # Update assumption logic
+                            # Determine next assumption based on history
                             if button_name == "tie":
-                                # If tie, retain the previous assumption
-                                print("Tie detected. Retaining previous assumption:", previous_assumption)
-                            else:
-                                # Analyze the results to determine the next assumption
-                                if len(previous_results) == 1:
-                                    # First result
-                                    previous_assumption = button_name
-                                    print("First result detected. Assuming:", previous_assumption)
-                                elif len(previous_results) == 2:
-                                    # Two results - analyze the pattern
-                                    if previous_results[0] == previous_results[1]:
-                                        previous_assumption = previous_results[1]
-                                        print("Two consecutive same results. Assuming:", previous_assumption)
-                                    else:
-                                        previous_assumption = "player" if previous_results[1] == "banker" else "banker"
-                                        print("Two different results. Assuming:", previous_assumption)
+                                # Retain previous assumption on tie
+                                if not previous_results[:-1]:  # First round tie case
+                                    print("First round is a tie. No assumption made.")
+                                    last_assumed_result = None
                                 else:
-                                    # More than two results - detect patterns
-                                    if all(r == previous_results[-1] for r in previous_results[-2:]):
-                                        # Same results consecutively
-                                        previous_assumption = previous_results[-1]
-                                        print("Detected consecutive same results. Assuming:", previous_assumption)
-                                    elif len(previous_results) >= 4 and previous_results[-4:] in [
-                                        ["player", "banker", "player", "banker"],
-                                        ["banker", "player", "banker", "player"]
-                                    ]:
-                                        # Alternating pattern detected
-                                        previous_assumption = "player" if previous_results[-1] == "banker" else "banker"
-                                        print("Detected alternating pattern. Assuming opposite:", previous_assumption)
-                                    elif previous_results[-3] == previous_results[-2] != previous_results[-1]:
-                                        # Two same followed by different
-                                        previous_assumption = previous_results[-1]
-                                        print("Two consecutive same and one different. Assuming:", previous_assumption)
-                                    
-                                        # Default to the last result
-                                    elif previous_results[-2] == previous_results[-1]:
-                                        print("Two previous results are same. Assuming last result:", previous_assumption)
-                                    else:
-                                        previous_assumption = "player" if previous_results[1] == "banker" else "banker"
-                                        print("Two different results. Assuming:", previous_assumption)
+                                    print("Result is a tie. Keeping previous assumption:", last_assumed_result)
+                            else:
+                                # Non-tie logic
+                                last_assumed_result = determine_next_assumption(previous_results)
 
                             # Reset round states
                             waiting_for_result = False
-                            bets_open_detected = False  # Reset the flag for next round
+                            bets_open_detected = False  # Reset the flag for the next round
                             round_complete = True       # Mark the round as complete
                             last_change_time[button_name] = time.time()
                             print("--------------------------------------NEXT ROUND-----------------------------------------")
@@ -212,6 +177,46 @@ def run_betting_script():
     connection.close()
 
 
+def determine_next_assumption(results):
+    """
+    Determines the next assumption based on the given results.
+    """
+    if len(results) == 1:
+        # First game result
+        print("First game result detected. Assuming:", results[0])
+        return results[0]
+
+    if len(results) == 2:
+        # Two results available
+        if results[-1] == results[-2]:
+            print("Two consecutive same results detected. Assuming:", results[-1])
+            return results[-1]
+        else:
+            next_assumption = "player" if results[-1] == "banker" else "banker"
+            print("Two different results detected. Assuming opposite:", next_assumption)
+            return next_assumption
+
+    if len(results) >= 3:
+        last_three = results[-3:]
+        if all(r == last_three[0] for r in last_three):
+            # More than 2 consecutive same results
+            print("Detected more than 2 consecutive same results. Assuming:", last_three[0])
+            return last_three[0]
+        elif last_three == ["player", "banker", "player"] or last_three == ["banker", "player", "banker"]:
+            # Alternating pattern
+            next_assumption = "player" if last_three[-1] == "banker" else "banker"
+            print("Detected alternating pattern. Assuming opposite:", next_assumption)
+            return next_assumption
+        elif last_three[0] == last_three[1] != last_three[2]:
+            # Two same, one different
+            print("Two consecutive same and one different. Assuming previous result:", last_three[-1])
+            return last_three[-1]
+        else:
+            # Default to last result
+            print("No specific pattern detected. Assuming last result:", last_three[-1])
+            return last_three[-1]
+
+
 # Add the unselect_after_result function to click at the unselect position after a result is detected
 def unselect_after_result():
     pyautogui.moveTo(50, 950)
@@ -219,3 +224,5 @@ def unselect_after_result():
 
 # Run the betting script
 run_betting_script()
+
+determine_next_assumption()
