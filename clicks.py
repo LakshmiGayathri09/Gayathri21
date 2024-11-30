@@ -9,8 +9,6 @@ import pytesseract
 
 pyautogui.FAILSAFE = False
 
-initial_bet = 5
-
 # Define regions for each button (player, banker, tie)
 button_regions = {
     "player": {"top": 630, "left": 180, "width": 100, "height": 50},
@@ -19,9 +17,6 @@ button_regions = {
 
 # Region for detecting the "BETS OPEN" text
 bets_open_region = {"top": 330, "left": 245, "width": 200, "height": 30}
-
-# Denomination region (example for denomination_1)
-denominations_region = {"top": 730, "left": 365, "width": 50, "height": 50}
 
 # Set path to Tesseract executable
 pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
@@ -45,7 +40,7 @@ def create_connection():
         print("Error connecting to MySQL", e)
         return None
 
-# Insert button event and wc value into MySQL database with lc (line count)
+# Insert button event, wc, bet, assume, and lc into MySQL database
 def insert_button_event(connection, game_result, wc, bet, assume, lc):
     try:
         cursor = connection.cursor()
@@ -84,13 +79,16 @@ def unselect_bet():
     pyautogui.click()  # Click on the empty area
 
 # Function to place a bet on player or banker (only click once)
-def place_bet(bet_target):
+def place_bet(bet_target, click_times):
     unselect_bet()  # Ensure previous bet is unselected before placing a new one
     target_region = button_regions[bet_target]
-    pyautogui.moveTo(target_region["left"] + target_region["width"] / 2,
-                     target_region["top"] + target_region["height"] / 2)
-    pyautogui.click()  # Place the bet with one click
-    print(f"Placed a bet on {bet_target}")
+    
+    # Click the betting button the required number of times
+    for _ in range(click_times):
+        pyautogui.moveTo(target_region["left"] + target_region["width"] / 2,
+                         target_region["top"] + target_region["height"] / 2)
+        pyautogui.click()  # Place the bet with one click
+        print(f"Placed a bet on {bet_target}, clicks {click_times}")
 
     # Move cursor away from buttons to avoid multiple clicks
     pyautogui.moveTo(result_unselect_position["x"], result_unselect_position["y"])
@@ -100,39 +98,7 @@ def unselect_after_result():
     pyautogui.moveTo(result_unselect_position["x"], result_unselect_position["y"])
     pyautogui.click()  # Click once to unselect any bet
 
-# Betting logic
-def betting_logic(wc_sequence):
-    bet = 0  # No bet for the first game
-    global initial_bet 
-    consecutive_zeroes = 0
-    bet_history = []
-
-    # Iterate through the game sequence based on win conditions (wc)
-    for i, wc in enumerate(wc_sequence):
-        if i == 0:
-            # For the first game, we don't bet, so the bet is None
-            bet = initial_bet
-        elif wc == 1:
-            # If wc is 1, bet is always 1
-            bet = initial_bet
-            consecutive_zeroes = 0
-        else:  # wc == 0
-            # If wc is 0, count consecutive zeros and adjust bet accordingly
-            consecutive_zeroes += 1
-
-            if consecutive_zeroes == 1:
-                bet = initial_bet * 2  # Bet is 2 after the first zero
-            elif consecutive_zeroes == 2:
-                bet = initial_bet * 4  # Bet is 4 after the second consecutive zero
-            elif consecutive_zeroes == 3:
-                bet = initial_bet * 1  # Bet is 1 after the third consecutive zero
-                consecutive_zeroes = 0  # Reset after three zeros
-
-        bet_history.append(bet)
-
-    return bet_history
-
-# Main function to handle detection, betting, and result-checking logic
+# Update assumption based on previous results
 def update_assumption(previous_results):
     if len(previous_results) == 0:
         return None  # No results yet
@@ -153,36 +119,10 @@ def update_assumption(previous_results):
         else:
             current_assumption = "banker" if first_result == "player" else "player"
 
-    print(f"Round {rounds_since_first_result}: Current Assumption: {current_assumption}")
+    print(f"Current Assumption: {current_assumption}")
     return current_assumption
 
-# Function to click on a denomination
-def click_denomination(sct):
-    denom_screenshot = sct.grab(denominations_region)
-    denom_img = np.array(denom_screenshot)
-    pyautogui.moveTo(denominations_region["left"] + denominations_region["width"] / 2,
-                     denominations_region["top"] + denominations_region["height"] / 2)
-    pyautogui.click()  # Click on the denomination button
-    print("Clicked on denomination of 100K" )
-
-# Function to place a bet considering the bet amount
-def place_bet_with_limit(bet_target, bet_amount, initial_bet):
-    # Calculate the number of clicks based on the bet amount
-    if bet_amount == 0:
-        print("No bet to place.")
-        return
-    
-    clicks = bet_amount // initial_bet  # Limit the number of clicks based on bet amount
-    target_region = button_regions[bet_target]
-    
-    # Click the bet target as many times as calculated
-    for _ in range(clicks):
-        pyautogui.moveTo(target_region["left"] + target_region["width"] / 2,
-                         target_region["top"] + target_region["height"] / 2)
-        pyautogui.click()
-        print(f"Placed {+1} / {clicks} bet(s) on {bet_target}")
-
-# Main betting script
+# Main function to handle detection, betting, and result-checking logic
 def run_betting_script():
     connection = create_connection()
     if connection is None:
@@ -197,46 +137,44 @@ def run_betting_script():
         previous_assumption = None       # Initialize with no assumption
         previous_game_result = None     # Track the previous game result (player or banker)
         current_lc = 0                  # Line count starts at L1
-        waiting_for_result = False       # Controls when to detect results
-        bets_open_detected = False       # Flag to ensure we detect BETS OPEN only once per round
-        round_complete = True            # Ensure a full round completes before restarting
-
-        round_number = 0                 # Track the round number to control bet logic
-        wc_sequence = []                 # Track the wc sequence to pass into betting_logic
-
-        bet = 1  # Set the initial bet to 1
+        initial_bet = 5                 # Bet for all rounds after the first round
+        bet = 0                          # The first round bet is 0
+        wc_zero_count = 0               # To track consecutive wc=0 outcomes
+        waiting_for_result = False      # Controls when to detect results
+        bets_open_detected = False      # Flag to ensure we detect BETS OPEN only once per round
+        round_complete = True           # Ensure a full round completes before restarting
+        round_count = 0                 # Track the current round
 
         while True:
             if not waiting_for_result and round_complete and not bets_open_detected:
                 if detect_bets_open_text(sct):
                     if previous_assumption is not None:
-                        # Click on the denomination first
-                        click_denomination(sct)
+                        # Reset bet for second round to initial_bet
+                        if round_count == 2:
+                            bet = initial_bet
+                            place_bet(previous_assumption, 1)  # Place bet once
+
+                        # Adjust the bet based on the wc_zero_count
+                        elif wc_zero_count == 0:
+                            bet = initial_bet
+                            place_bet(previous_assumption, 1)  # Place bet once
+                        elif wc_zero_count == 1:
+                            bet = initial_bet * 2
+                            place_bet(previous_assumption, 2)  # Place bet twice
+                        elif wc_zero_count == 2:
+                            bet = initial_bet * 4
+                            place_bet(previous_assumption, 4)  # Place bet four times
+                        elif wc_zero_count == 3:
+                            bet = initial_bet
+                            place_bet(previous_assumption, 1)  # Place bet once
+                            wc_zero_count = 0  # Reset after 3 consecutive zeros
 
                     waiting_for_result = True
                     bets_open_detected = True
                     round_complete = False
+                    print(f" Round {round_count +1} Waiting for the game result...  ,Bet: {bet} ")
 
-                    # Determine bet amount for the current round
-                    if round_number == 0:
-                        bet_amount = 0  # No bet on first round
-                        print(f"Round {round_number + 1}: Waiting for the game result... Bet: {bet_amount}")
-                    else:
-                        # Determine bet using the wc sequence
-                        bet_history = betting_logic(wc_sequence)
-                        bet_amount = bet_history[-1]  # Take the last bet in the sequence
-
-                    # Ensure no bet on the first round (bet_amount == 0)
-                    if round_number > 0 and bet_amount > 0:
-                        print(f"Round {round_number + 1}: Waiting for the game result... Bet: {bet_amount}")
-
-                        # Place bet based on the previous assumption
-                        place_bet_with_limit(previous_assumption, bet_amount, initial_bet)
-                    waiting_for_result = True
-                    bets_open_detected = True
-                    round_complete = False
                     prev_button_colors = {button: None for button in button_regions}
-                    round_number += 1  # Increment round number for the next cycle
                     time.sleep(10)
 
             if waiting_for_result:
@@ -261,25 +199,34 @@ def run_betting_script():
                                 lc = current_lc
 
                             # Insert result, wc, bet, assumption, and lc into the database
-                            insert_button_event(connection, button_name, wc, bet_amount, previous_assumption, f"L{lc}")
-                            print(f"{button_name} WON - wc: {wc}, Bet: {bet_amount}, Assumption: {previous_assumption}, lc: L{lc}")
+                            insert_button_event(connection, button_name, wc, bet, previous_assumption, f"L{lc}")
+                            print(f"{button_name} WON - wc: {wc}, Bet: {bet}, Assumption: {previous_assumption}, lc: L{lc}")
 
-                            # Update the previous game result for lc comparison
-                            previous_game_result = button_name
+                            # Update wc_zero_count based on wc
+                            if wc == 0:
+                                wc_zero_count += 1
+                            else:
+                                wc_zero_count = 0  # Reset count when wc=1
 
                             # Only consider Player/Banker results for pattern detection
                             if button_name != "tie":
                                 previous_results.append(button_name)
-                                wc_sequence.append(wc)  # Append the wc value to the sequence
 
                             # Update assumption
                             previous_assumption = update_assumption(previous_results)
+
+                            # Update the previous game result for lc comparison
+                            previous_game_result = button_name
 
                             # Reset round states
                             waiting_for_result = False
                             bets_open_detected = False
                             round_complete = True
                             last_change_time[button_name] = time.time()
+
+                            # Increment round count
+                            round_count += 1
+
                             print("--------------------------------------NEXT ROUND-----------------------------------------")
 
                             # Automatically unselect the bet after result
